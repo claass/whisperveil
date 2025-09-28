@@ -298,13 +298,13 @@ if st.session_state.show_art and st.session_state.images:
                 column.image(
                     image_payload,
                     caption=f"{card['name']} ({card['orientation']})",
-                    use_column_width=True,
+                    use_container_width=True,
                 )
             elif isinstance(image_payload, str):
                 column.image(
                     image_payload,
                     caption=f"{card['name']} ({card['orientation']})",
-                    use_column_width=True,
+                    use_container_width=True,
                 )
             else:
                 column.info("Image unavailable.")

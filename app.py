@@ -154,18 +154,16 @@ def generate_card_images(cards, theme_key, card_indices=None):
     return images, errors
 
 
-def ensure_card_images(regenerate: bool = False):
-    cards = st.session_state.cards
-    theme = st.session_state.theme
+def ensure_theme_images(cards, theme, *, regenerate: bool = False, prefix: str):
     if not cards:
-        st.session_state.images = []
-        st.session_state.image_error = ""
-        st.session_state.image_meta = {}
+        st.session_state[f"{prefix}_images"] = []
+        st.session_state[f"{prefix}_image_error"] = ""
+        st.session_state[f"{prefix}_image_meta"] = {}
         return False
 
     signature = card_signature(cards)
-    meta = st.session_state.get("image_meta") or {}
-    stored_images = list(st.session_state.get("images", []))
+    meta = st.session_state.get(f"{prefix}_image_meta") or {}
+    stored_images = list(st.session_state.get(f"{prefix}_images", []))
 
     if regenerate:
         stored_images = [None] * len(cards)
@@ -180,21 +178,21 @@ def ensure_card_images(regenerate: bool = False):
         and meta.get("signature") == signature
         and all(image is not None for image in stored_images)
     ):
-        st.session_state.images = stored_images
+        st.session_state[f"{prefix}_images"] = stored_images
         return False
 
     missing_indices = [idx for idx, payload in enumerate(stored_images) if payload is None]
 
     if not missing_indices:
-        st.session_state.images = stored_images
-        st.session_state.image_meta = {"theme": theme, "signature": signature}
-        st.session_state.image_error = ""
+        st.session_state[f"{prefix}_images"] = stored_images
+        st.session_state[f"{prefix}_image_meta"] = {"theme": theme, "signature": signature}
+        st.session_state[f"{prefix}_image_error"] = ""
         return False
 
     if not client:
-        st.session_state.images = stored_images
-        st.session_state.image_error = "missing_client"
-        st.session_state.image_meta = {}
+        st.session_state[f"{prefix}_images"] = stored_images
+        st.session_state[f"{prefix}_image_error"] = "missing_client"
+        st.session_state[f"{prefix}_image_meta"] = {}
         return False
 
     with st.spinner("Conjuring tarot artwork..."):
@@ -203,9 +201,9 @@ def ensure_card_images(regenerate: bool = False):
     for position, card_index in enumerate(missing_indices):
         stored_images[card_index] = new_images[position]
 
-    st.session_state.images = stored_images
-    st.session_state.image_meta = {"theme": theme, "signature": signature}
-    st.session_state.image_error = "; ".join(errors) if errors else ""
+    st.session_state[f"{prefix}_images"] = stored_images
+    st.session_state[f"{prefix}_image_meta"] = {"theme": theme, "signature": signature}
+    st.session_state[f"{prefix}_image_error"] = "; ".join(errors) if errors else ""
     return True
 
 
@@ -242,12 +240,22 @@ if "cards" not in st.session_state:
     st.session_state.cards = draw_cards(st.session_state.spread)
 if "theme" not in st.session_state:
     st.session_state.theme = list(IMAGE_THEMES.keys())[0]
-if "images" not in st.session_state:
-    st.session_state.images = []
-if "image_meta" not in st.session_state:
-    st.session_state.image_meta = {"theme": None, "signature": None}
-if "image_error" not in st.session_state:
-    st.session_state.image_error = ""
+if "gallery_cards" not in st.session_state:
+    st.session_state.gallery_cards = [
+        {
+            "position": card["name"],
+            "name": card["name"],
+            "orientation": "upright",
+            "meaning": card["upright"],
+        }
+        for card in MAJOR_ARCANA
+    ]
+if "gallery_images" not in st.session_state:
+    st.session_state.gallery_images = []
+if "gallery_image_meta" not in st.session_state:
+    st.session_state.gallery_image_meta = {"theme": None, "signature": None}
+if "gallery_image_error" not in st.session_state:
+    st.session_state.gallery_image_error = ""
 
 
 # UI
@@ -261,33 +269,27 @@ with st.sidebar:
     if selected_spread != st.session_state.spread:
         st.session_state.spread = selected_spread
         st.session_state.cards = draw_cards(selected_spread)
-        st.session_state.images = []
-        st.session_state.image_meta = {}
         st.session_state.messages = []
-        st.session_state.image_error = ""
 
     theme_options = list(IMAGE_THEMES.keys())
     theme_index = theme_options.index(st.session_state.theme)
     selected_theme = st.selectbox("Visual theme", theme_options, index=theme_index)
     if selected_theme != st.session_state.theme:
         st.session_state.theme = selected_theme
-        st.session_state.images = []
-        st.session_state.image_meta = {}
-        st.session_state.image_error = ""
+        st.session_state.gallery_images = []
+        st.session_state.gallery_image_meta = {}
+        st.session_state.gallery_image_error = ""
 
     if st.button("Draw new cards"):
         st.session_state.cards = draw_cards(st.session_state.spread)
-        st.session_state.images = []
-        st.session_state.image_meta = {}
-        st.session_state.image_error = ""
 
     if st.button("Reset chat"):
         st.session_state.messages = []
 
     if st.button("Regenerate art"):
-        st.session_state.images = []
-        st.session_state.image_meta = {}
-        st.session_state.image_error = ""
+        st.session_state.gallery_images = []
+        st.session_state.gallery_image_meta = {}
+        st.session_state.gallery_image_error = ""
 
     st.divider()
     st.write("Chat model:", MODEL)
@@ -317,47 +319,54 @@ with reading_tab:
 
 with gallery_tab:
     st.subheader("Card Gallery")
-    cards = st.session_state.cards
-    images = list(st.session_state.get("images", []))
+    theme = st.session_state.theme
+    cards = st.session_state.gallery_cards
+    images = list(st.session_state.get("gallery_images", []))
 
     if len(images) != len(cards):
         images = (images + [None] * len(cards))[: len(cards)]
-        st.session_state.images = images
+        st.session_state.gallery_images = images
 
     missing_indices = [idx for idx, payload in enumerate(images) if payload is None]
 
     outstanding_label = "Generate outstanding art"
     if st.button(outstanding_label, disabled=not missing_indices):
-        ensure_card_images()
-        images = st.session_state.images
+        ensure_theme_images(cards, theme, prefix="gallery")
+        images = st.session_state.gallery_images
         missing_indices = [idx for idx, payload in enumerate(images) if payload is None]
 
     if st.button("Regenerate all art", disabled=not cards):
-        ensure_card_images(regenerate=True)
-        images = st.session_state.images
+        ensure_theme_images(cards, theme, regenerate=True, prefix="gallery")
+        images = st.session_state.gallery_images
         missing_indices = [idx for idx, payload in enumerate(images) if payload is None]
 
     if cards:
-        columns = st.columns(len(cards))
-        for column, card, image_payload in zip(columns, cards, images):
+        columns = st.columns(3)
+        active_cards = {card["name"] for card in st.session_state.cards}
+        for index, (card, image_payload) in enumerate(zip(cards, images)):
+            column = columns[index % len(columns)]
             with column:
                 caption = f"{card['name']} ({card['orientation']})"
+                if card["name"] in active_cards:
+                    st.caption("Currently in your reading")
                 if isinstance(image_payload, (bytes, bytearray)):
-                    column.image(image_payload, caption=caption, width="stretch")
+                    st.image(image_payload, caption=caption, width="stretch")
                 elif isinstance(image_payload, str):
-                    column.image(image_payload, caption=caption, width="stretch")
+                    st.image(image_payload, caption=caption, width="stretch")
                 else:
-                    column.image(
+                    st.image(
                         "https://placehold.co/600x900?text=Awaiting+Art",
                         caption=caption,
                         width="stretch",
                     )
-                    column.caption("Click “Generate outstanding art” to conjure this card.")
+                    st.caption("Click “Generate outstanding art” to conjure this card.")
     else:
         st.info("Draw cards to begin building your gallery.")
 
-    if st.session_state.image_error == "missing_client":
+    if st.session_state.gallery_image_error == "missing_client":
         st.info("Add your OPENAI_API_KEY to generate tarot card artwork.")
-    elif st.session_state.image_error:
-        st.warning(f"Could not generate tarot artwork right now: {st.session_state.image_error}")
+    elif st.session_state.gallery_image_error:
+        st.warning(
+            f"Could not generate tarot artwork right now: {st.session_state.gallery_image_error}"
+        )
 

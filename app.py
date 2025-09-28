@@ -110,8 +110,11 @@ def card_signature(cards):
     return tuple(f"{c['position']}::{c['name']}::{c['orientation']}" for c in cards)
 
 
-def generate_card_images(cards, theme_key):
+def generate_card_images(cards, theme_key, card_indices=None):
     theme = IMAGE_THEMES[theme_key]
+
+    if card_indices is None:
+        card_indices = list(range(len(cards)))
 
     def render_card(card):
         prompt = (
@@ -135,10 +138,12 @@ def generate_card_images(cards, theme_key):
         except Exception as exc:
             return None, str(exc)
 
-    images = [None] * len(cards)
+    images = [None] * len(card_indices)
     errors = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(cards) or 1) as executor:
-        future_map = {executor.submit(render_card, card): idx for idx, card in enumerate(cards)}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(card_indices) or 1) as executor:
+        future_map = {
+            executor.submit(render_card, cards[idx]): position for position, idx in enumerate(card_indices)
+        }
         for future in concurrent.futures.as_completed(future_map):
             idx = future_map[future]
             image_bytes, error_msg = future.result()
@@ -149,38 +154,59 @@ def generate_card_images(cards, theme_key):
     return images, errors
 
 
-def ensure_card_images():
+def ensure_card_images(regenerate: bool = False):
     cards = st.session_state.cards
     theme = st.session_state.theme
     if not cards:
         st.session_state.images = []
         st.session_state.image_error = ""
-        return
+        st.session_state.image_meta = {}
+        return False
 
-    meta = st.session_state.get("image_meta") or {}
     signature = card_signature(cards)
-    current_images = st.session_state.get("images", [])
+    meta = st.session_state.get("image_meta") or {}
+    stored_images = list(st.session_state.get("images", []))
+
+    if regenerate:
+        stored_images = [None] * len(cards)
+        meta = {}
+
+    if len(stored_images) != len(cards):
+        stored_images = (stored_images + [None] * len(cards))[: len(cards)]
 
     if (
-        meta.get("theme") == theme
+        not regenerate
+        and meta.get("theme") == theme
         and meta.get("signature") == signature
-        and len(current_images) == len(cards)
-        and all(img is not None for img in current_images)
+        and all(image is not None for image in stored_images)
     ):
-        return
+        st.session_state.images = stored_images
+        return False
+
+    missing_indices = [idx for idx, payload in enumerate(stored_images) if payload is None]
+
+    if not missing_indices:
+        st.session_state.images = stored_images
+        st.session_state.image_meta = {"theme": theme, "signature": signature}
+        st.session_state.image_error = ""
+        return False
 
     if not client:
-        st.session_state.images = []
+        st.session_state.images = stored_images
         st.session_state.image_error = "missing_client"
         st.session_state.image_meta = {}
-        return
+        return False
 
     with st.spinner("Conjuring tarot artwork..."):
-        images, errors = generate_card_images(cards, theme)
+        new_images, errors = generate_card_images(cards, theme, missing_indices)
 
-    st.session_state.images = images
+    for position, card_index in enumerate(missing_indices):
+        stored_images[card_index] = new_images[position]
+
+    st.session_state.images = stored_images
     st.session_state.image_meta = {"theme": theme, "signature": signature}
     st.session_state.image_error = "; ".join(errors) if errors else ""
+    return True
 
 
 def generate_answer(prompt: str) -> str:
@@ -222,8 +248,6 @@ if "image_meta" not in st.session_state:
     st.session_state.image_meta = {"theme": None, "signature": None}
 if "image_error" not in st.session_state:
     st.session_state.image_error = ""
-if "show_art" not in st.session_state:
-    st.session_state.show_art = False
 
 
 # UI
@@ -271,62 +295,69 @@ with st.sidebar:
     if not API_KEY:
         st.warning("Set OPENAI_API_KEY in your environment or .env file.")
 
-st.subheader("Your Spread")
-st.code(cards_text(st.session_state.cards))
+reading_tab, gallery_tab = st.tabs(["Reading", "Gallery"])
 
-show_art = st.checkbox(
-    "Show card art",
-    value=st.session_state.show_art,
-    help="Toggle on to generate DALL-E 3 art for the drawn cards.",
-)
-if show_art != st.session_state.show_art:
-    st.session_state.show_art = show_art
-    if not show_art:
-        st.session_state.images = []
-        st.session_state.image_meta = {}
-        st.session_state.image_error = ""
+with reading_tab:
+    st.subheader("Your Spread")
+    st.code(cards_text(st.session_state.cards))
 
-if st.session_state.show_art:
-    ensure_card_images()
+    # Render chat history
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
 
-if st.session_state.show_art and st.session_state.images:
-    st.subheader("Card Art")
-    art_columns = st.columns(len(st.session_state.cards))
-    for column, card, image_payload in zip(art_columns, st.session_state.cards, st.session_state.images):
-        with column:
-            if isinstance(image_payload, (bytes, bytearray)):
-                column.image(
-                    image_payload,
-                    caption=f"{card['name']} ({card['orientation']})",
-                    use_container_width=True,
-                )
-            elif isinstance(image_payload, str):
-                column.image(
-                    image_payload,
-                    caption=f"{card['name']} ({card['orientation']})",
-                    use_container_width=True,
-                )
-            else:
-                column.info("Image unavailable.")
-    if st.session_state.image_error:
-        st.caption(f"⚠️ {st.session_state.image_error}")
-elif st.session_state.show_art and st.session_state.image_error == "missing_client":
-    st.info("Add your OPENAI_API_KEY to generate tarot card artwork.")
-elif st.session_state.show_art and st.session_state.image_error:
-    st.warning(f"Could not generate tarot artwork right now: {st.session_state.image_error}")
+    # Input → model call
+    if user_input := st.chat_input("Ask your question..."):
+        st.session_state.messages.append({"role": "user", "content": user_input})
+        with st.chat_message("assistant"):
+            with st.spinner("Shuffling the deck..."):
+                answer = generate_answer(user_input)
+                st.markdown(answer)
+        st.session_state.messages.append({"role": "assistant", "content": answer})
 
+with gallery_tab:
+    st.subheader("Card Gallery")
+    cards = st.session_state.cards
+    images = list(st.session_state.get("images", []))
 
-# Render chat history
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
+    if len(images) != len(cards):
+        images = (images + [None] * len(cards))[: len(cards)]
+        st.session_state.images = images
 
+    missing_indices = [idx for idx, payload in enumerate(images) if payload is None]
 
-# Input → model call
-if user_input := st.chat_input("Ask your question..."):
-    st.session_state.messages.append({"role": "user", "content": user_input})
-    with st.chat_message("assistant"):
-        with st.spinner("Shuffling the deck..."):
-            answer = generate_answer(user_input)
-            st.markdown(answer)
-    st.session_state.messages.append({"role": "assistant", "content": answer})
+    outstanding_label = "Generate outstanding art"
+    if st.button(outstanding_label, disabled=not missing_indices):
+        ensure_card_images()
+        images = st.session_state.images
+        missing_indices = [idx for idx, payload in enumerate(images) if payload is None]
+
+    if st.button("Regenerate all art", disabled=not cards):
+        ensure_card_images(regenerate=True)
+        images = st.session_state.images
+        missing_indices = [idx for idx, payload in enumerate(images) if payload is None]
+
+    if cards:
+        columns = st.columns(len(cards))
+        for column, card, image_payload in zip(columns, cards, images):
+            with column:
+                caption = f"{card['name']} ({card['orientation']})"
+                if isinstance(image_payload, (bytes, bytearray)):
+                    column.image(image_payload, caption=caption, width="stretch")
+                elif isinstance(image_payload, str):
+                    column.image(image_payload, caption=caption, width="stretch")
+                else:
+                    column.image(
+                        "https://placehold.co/600x900?text=Awaiting+Art",
+                        caption=caption,
+                        width="stretch",
+                    )
+                    column.caption("Click “Generate outstanding art” to conjure this card.")
+    else:
+        st.info("Draw cards to begin building your gallery.")
+
+    if st.session_state.image_error == "missing_client":
+        st.info("Add your OPENAI_API_KEY to generate tarot card artwork.")
+    elif st.session_state.image_error:
+        st.warning(f"Could not generate tarot artwork right now: {st.session_state.image_error}")
+
